@@ -3,6 +3,10 @@ import pandas as pd
 import altair as alt
 from pathlib import Path
 from datetime import date, timedelta, datetime
+import io
+import requests
+import pandas as pd
+import streamlit as st
 
 from ticket_dashboard import render_ticket_dashboard
 from sales_dashboard import render_sales_dashboard
@@ -26,24 +30,14 @@ CARD_BORDER = "rgba(255,255,255,0.10)"
 # =========================
 # PATH HELPERS
 # =========================
-def resolve_excel_path() -> str:
-    candidates = [
-        Path("allcall_bi_data.xlsx"),
-        Path("data/allcall_bi_data.xlsx"),
-        Path.home() / "Documents" / "allcall_bi_data.xlsx",
-    ]
-    for p in candidates:
-        if p.exists():
-            return str(p)
+@st.cache_data(ttl=60)
+def load_excel():
+    url = st.secrets["https://ftp.clouds.mn/s/Xrm8jqRPwP4Z8dN/download"]
 
-    raise FileNotFoundError(
-        "Excel файл олдсонгүй.\n"
-        "Checked:\n"
-        "- allcall_bi_data.xlsx\n"
-        "- data/allcall_bi_data.xlsx\n"
-        "- ~/Documents/allcall_bi_data.xlsx"
-    )
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
 
+    return pd.read_excel(io.BytesIO(r.content), sheet_name=None)
 
 def resolve_logo_path() -> str | None:
     candidates = [
