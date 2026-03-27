@@ -30,14 +30,16 @@ CARD_BORDER = "rgba(255,255,255,0.10)"
 # =========================
 # PATH HELPERS
 # =========================
+
 @st.cache_data(ttl=60)
 def load_excel():
-    url = st.secrets["https://ftp.clouds.mn/s/Xrm8jqRPwP4Z8dN/download"]
+    url = st.secrets["https://ftp.clouds.mn/s/Xrm8jqRPwP4Z8dN/downloadЫ"]
 
     r = requests.get(url, timeout=60)
     r.raise_for_status()
 
     return pd.read_excel(io.BytesIO(r.content), sheet_name=None)
+
 
 def resolve_logo_path() -> str | None:
     candidates = [
@@ -49,9 +51,8 @@ def resolve_logo_path() -> str | None:
         if p.exists():
             return str(p)
     return None
-    
 LOGO_PATH = resolve_logo_path()
-
+DATA = load_excel()
 # =========================
 # CSS
 # =========================
