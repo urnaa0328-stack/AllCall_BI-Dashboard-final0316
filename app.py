@@ -1,11 +1,10 @@
-import streamlit as st
-import pandas as pd
-import altair as alt
+import io
 from pathlib import Path
 from datetime import date, timedelta, datetime
-import io
-import requests
+
+import altair as alt
 import pandas as pd
+import requests
 import streamlit as st
 
 from ticket_dashboard import render_ticket_dashboard
@@ -28,17 +27,28 @@ CARD_BG = "rgba(255,255,255,0.10)"
 CARD_BORDER = "rgba(255,255,255,0.10)"
 
 # =========================
-# PATH HELPERS
+# DATA SOURCE
 # =========================
+DATA_FILE_URL = "https://ftp.clouds.mn/s/Xrm8jqRPwP4Z8dN/download"
 
+# =========================
+# HELPERS
+# =========================
 @st.cache_data(ttl=60)
-def load_excel():
-    url = st.secrets["https://ftp.clouds.mn/s/Xrm8jqRPwP4Z8dN/downloadЫ"]
-
-    r = requests.get(url, timeout=60)
+def load_all_sheets() -> dict[str, pd.DataFrame]:
+    r = requests.get(DATA_FILE_URL, timeout=60)
     r.raise_for_status()
 
-    return pd.read_excel(io.BytesIO(r.content), sheet_name=None)
+    xls = pd.ExcelFile(io.BytesIO(r.content))
+    required = ["Ticket", "Sales", "Social media", "Operation"]
+
+    data: dict[str, pd.DataFrame] = {}
+    for sheet in required:
+        if sheet not in xls.sheet_names:
+            raise ValueError(f"'{sheet}' sheet олдсонгүй. Байгаа sheet-үүд: {xls.sheet_names}")
+        data[sheet] = pd.read_excel(xls, sheet_name=sheet)
+
+    return data
 
 
 def resolve_logo_path() -> str | None:
@@ -51,8 +61,206 @@ def resolve_logo_path() -> str | None:
         if p.exists():
             return str(p)
     return None
+
+
+def _norm_str(x) -> str:
+    return "" if pd.isna(x) else str(x).strip()
+
+
+def _parse_money(x):
+    if pd.isna(x):
+        return 0.0
+    s = str(x).strip().replace("₮", "").replace("$", "").replace(",", "")
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def _parse_percent(x):
+    if pd.isna(x):
+        return 0.0
+    s = str(x).strip().replace("%", "").replace(",", "")
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def render_kpi_card(title: str, value: str, subtitle: str, icon: str):
+    st.markdown(
+        f"""
+        <div class="kpi-card">
+            <div class="kpi-top">
+                <div class="kpi-title">{title}</div>
+                <div class="kpi-icon">{icon}</div>
+            </div>
+            <div class="kpi-value">{value}</div>
+            <div class="kpi-sub">{subtitle}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _filter_by_date(df: pd.DataFrame, date_col: str, dfrom: date, dto: date) -> pd.DataFrame:
+    if date_col not in df.columns:
+        return df.copy()
+    start_dt = pd.Timestamp(dfrom)
+    end_dt = pd.Timestamp(dto) + pd.Timedelta(days=1)
+    return df[(df[date_col] >= start_dt) & (df[date_col] < end_dt)].copy()
+
+
+# =========================
+# PREP FUNCTIONS FOR OVERVIEW
+# =========================
+def _prep_ticket(df: pd.DataFrame) -> pd.DataFrame:
+    dfx = df.copy()
+    rename_map = {
+        "Огноо": "date",
+        "Суваг": "channel",
+        "Төрөл": "issue_type",
+        "Санал, гомдол": "issue_detail",
+        "Төлөв": "status",
+        "Оператор": "operator",
+    }
+    dfx = dfx.rename(columns=rename_map)
+
+    if "date" in dfx.columns:
+        dfx["date"] = pd.to_datetime(dfx["date"], errors="coerce")
+
+    for c in ["channel", "issue_type", "issue_detail", "status", "operator"]:
+        if c in dfx.columns:
+            dfx[c] = dfx[c].apply(_norm_str)
+
+    return dfx
+
+
+def _prep_sales(df: pd.DataFrame) -> pd.DataFrame:
+    dfx = df.copy()
+    rename_map = {
+        "Холбогдсон дугаар": "contact_no",
+        "Байгууллагын нэр": "company_name",
+        "Хэрэгцээ": "need_type",
+        "Явц": "stage",
+        "Дүн": "amount",
+        "Магадлал": "probability",
+        "Магадлалын дүн": "weighted_amount",
+        "Санал тавьж эхэлсэн огноо": "proposal_start_date",
+        "Санал баталгаажсан огноо": "proposal_confirm_date",
+        "Баг": "team",
+        "Бие даалт": "ownership_pct",
+        "Сүүлд холбогдсон байдал": "last_contact_date",
+        "Дараагийн холбоо": "next_contact",
+    }
+    dfx = dfx.rename(columns=rename_map)
+
+    for c in ["company_name", "need_type", "stage", "team", "next_contact"]:
+        if c in dfx.columns:
+            dfx[c] = dfx[c].apply(_norm_str)
+
+    for c in ["proposal_start_date", "proposal_confirm_date", "last_contact_date"]:
+        if c in dfx.columns:
+            dfx[c] = pd.to_datetime(dfx[c], errors="coerce")
+
+    dfx["amount_num"] = dfx["amount"].apply(_parse_money) if "amount" in dfx.columns else 0.0
+    dfx["weighted_amount_num"] = dfx["weighted_amount"].apply(_parse_money) if "weighted_amount" in dfx.columns else 0.0
+    dfx["probability_num"] = dfx["probability"].apply(_parse_percent) if "probability" in dfx.columns else 0.0
+
+    return dfx
+
+
+def _prep_social(df: pd.DataFrame) -> pd.DataFrame:
+    dfx = df.copy()
+
+    rename_map = {
+        "Эхэлсэн огноо": "start_date",
+        "Дууссан огноо": "end_date",
+        "Boost-н өдөр": "boost_days",
+        "Постын агуулга": "post_content",
+        "Пост үзсэн тоо": "post_views",
+        "Үзэгчид": "viewers",
+        "Чат эхлүүлсэн тоо": "chat_started",
+        "Постын төсөв ($ өдөрт)": "daily_budget_usd",
+        "Нийт зарцуулсан ($)": "total_spend_usd",
+        "Нийт зарцуулсан (₮)": "total_spend_mnt",
+        "Хоолой (₮)": "voice_spend_mnt",
+        "Adobe (₮)": "adobe_spend_mnt",
+        "Hera (₮)": "hera_spend_mnt",
+    }
+    dfx = dfx.rename(columns=rename_map)
+
+    if "post_content" in dfx.columns:
+        dfx["post_content"] = dfx["post_content"].apply(_norm_str)
+
+    for c in ["start_date", "end_date"]:
+        if c in dfx.columns:
+            dfx[c] = pd.to_datetime(dfx[c], errors="coerce")
+
+    numeric_cols = [
+        "boost_days",
+        "post_views",
+        "viewers",
+        "chat_started",
+        "daily_budget_usd",
+        "total_spend_usd",
+        "total_spend_mnt",
+        "voice_spend_mnt",
+        "adobe_spend_mnt",
+        "hera_spend_mnt",
+    ]
+    for c in numeric_cols:
+        if c in dfx.columns:
+            dfx[c] = dfx[c].apply(_parse_money)
+
+    if "post_content" in dfx.columns:
+        dfx = dfx[dfx["post_content"] != ""].copy()
+
+    return dfx
+
+
+def _prep_operation(df: pd.DataFrame) -> pd.DataFrame:
+    dfx = df.copy()
+    rename_map = {
+        "Ажлын төрөл": "task_type",
+        "Төслийн нэр": "project_name",
+        "Эхлэх огноо": "start_date",
+        "Дуусах огноо": "end_date",
+        "Хугацаа": "duration_days",
+        "Хариуцагч": "owner",
+        "Дэмжигч": "supporter",
+        "Явцын тайлбар": "progress_note",
+        "Явц": "status",
+    }
+    dfx = dfx.rename(columns=rename_map)
+
+    for c in ["task_type", "project_name", "owner", "supporter", "progress_note", "status"]:
+        if c in dfx.columns:
+            dfx[c] = dfx[c].apply(_norm_str)
+
+    for c in ["start_date", "end_date"]:
+        if c in dfx.columns:
+            dfx[c] = pd.to_datetime(dfx[c], errors="coerce")
+
+    if "duration_days" in dfx.columns:
+        dfx["duration_days_num"] = pd.to_numeric(dfx["duration_days"], errors="coerce").fillna(0)
+    else:
+        dfx["duration_days_num"] = 0.0
+
+    return dfx
+
+
+# =========================
+# INIT
+# =========================
 LOGO_PATH = resolve_logo_path()
-DATA = load_excel()
+
+try:
+    sheets = load_all_sheets()
+except Exception as e:
+    st.error(f"Excel файл ачааллахад алдаа гарлаа: {e}")
+    st.stop()
+
 # =========================
 # CSS
 # =========================
@@ -177,6 +385,7 @@ st.markdown(
     .mini-note {{
         color: {MUTED} !important;
         font-size: .88rem;
+        word-break: break-all;
     }}
 
     .divider {{
@@ -228,228 +437,6 @@ st.markdown(
 )
 
 # =========================
-# COMMON HELPERS
-# =========================
-def _norm_str(x) -> str:
-    return "" if pd.isna(x) else str(x).strip()
-
-
-def _parse_money(x):
-    if pd.isna(x):
-        return 0.0
-    s = str(x).strip().replace("₮", "").replace("$", "").replace(",", "")
-    try:
-        return float(s)
-    except Exception:
-        return 0.0
-
-
-def _parse_percent(x):
-    if pd.isna(x):
-        return 0.0
-    s = str(x).strip().replace("%", "").replace(",", "")
-    try:
-        return float(s)
-    except Exception:
-        return 0.0
-
-
-def render_kpi_card(title: str, value: str, subtitle: str, icon: str):
-    st.markdown(
-        f"""
-        <div class="kpi-card">
-            <div class="kpi-top">
-                <div class="kpi-title">{title}</div>
-                <div class="kpi-icon">{icon}</div>
-            </div>
-            <div class="kpi-value">{value}</div>
-            <div class="kpi-sub">{subtitle}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def _filter_by_date(df: pd.DataFrame, date_col: str, dfrom: date, dto: date) -> pd.DataFrame:
-    if date_col not in df.columns:
-        return df.copy()
-    start_dt = pd.Timestamp(dfrom)
-    end_dt = pd.Timestamp(dto) + pd.Timedelta(days=1)
-    return df[(df[date_col] >= start_dt) & (df[date_col] < end_dt)].copy()
-
-# =========================
-# PREP FUNCTIONS FOR OVERVIEW
-# =========================
-def _prep_ticket(df: pd.DataFrame) -> pd.DataFrame:
-    dfx = df.copy()
-    rename_map = {
-        "Огноо": "date",
-        "Суваг": "channel",
-        "Төрөл": "issue_type",
-        "Санал, гомдол": "issue_detail",
-        "Төлөв": "status",
-        "Оператор": "operator",
-    }
-    dfx = dfx.rename(columns=rename_map)
-
-    if "date" in dfx.columns:
-        dfx["date"] = pd.to_datetime(dfx["date"], errors="coerce")
-
-    for c in ["channel", "issue_type", "issue_detail", "status", "operator"]:
-        if c in dfx.columns:
-            dfx[c] = dfx[c].apply(_norm_str)
-
-    return dfx
-
-
-def _prep_sales(df: pd.DataFrame) -> pd.DataFrame:
-    dfx = df.copy()
-    rename_map = {
-        "Холбогдсон дугаар": "contact_no",
-        "Байгууллагын нэр": "company_name",
-        "Хэрэгцээ": "need_type",
-        "Явц": "stage",
-        "Дүн": "amount",
-        "Магадлал": "probability",
-        "Магадлалын дүн": "weighted_amount",
-        "Санал тавьж эхэлсэн огноо": "proposal_start_date",
-        "Санал баталгаажсан огноо": "proposal_confirm_date",
-        "Баг": "team",
-        "Бие даалт": "ownership_pct",
-        "Сүүлд холбогдсон байдал": "last_contact_date",
-        "Дараагийн холбоо": "next_contact",
-    }
-    dfx = dfx.rename(columns=rename_map)
-
-    for c in ["company_name", "need_type", "stage", "team", "next_contact"]:
-        if c in dfx.columns:
-            dfx[c] = dfx[c].apply(_norm_str)
-
-    for c in ["proposal_start_date", "proposal_confirm_date", "last_contact_date"]:
-        if c in dfx.columns:
-            dfx[c] = pd.to_datetime(dfx[c], errors="coerce")
-
-    if "amount" in dfx.columns:
-        dfx["amount_num"] = dfx["amount"].apply(_parse_money)
-    else:
-        dfx["amount_num"] = 0.0
-
-    if "weighted_amount" in dfx.columns:
-        dfx["weighted_amount_num"] = dfx["weighted_amount"].apply(_parse_money)
-    else:
-        dfx["weighted_amount_num"] = 0.0
-
-    if "probability" in dfx.columns:
-        dfx["probability_num"] = dfx["probability"].apply(_parse_percent)
-    else:
-        dfx["probability_num"] = 0.0
-
-    return dfx
-
-
-def _prep_social(df: pd.DataFrame) -> pd.DataFrame:
-    dfx = df.copy()
-
-    rename_map = {
-        "Эхэлсэн огноо": "start_date",
-        "Дууссан огноо": "end_date",
-        "Boost-н өдөр": "boost_days",
-        "Постын агуулга": "post_content",
-        "Пост үзсэн тоо": "post_views",
-        "Үзэгчид": "viewers",
-        "Чат эхлүүлсэн тоо": "chat_started",
-        "Постын төсөв ($ өдөрт)": "daily_budget_usd",
-        "Нийт зарцуулсан ($)": "total_spend_usd",
-        "Нийт зарцуулсан (₮)": "total_spend_mnt",
-        "Хоолой (₮)": "voice_spend_mnt",
-        "Adobe (₮)": "adobe_spend_mnt",
-        "Hera (₮)": "hera_spend_mnt",
-    }
-    dfx = dfx.rename(columns=rename_map)
-
-    if "post_content" in dfx.columns:
-        dfx["post_content"] = dfx["post_content"].apply(_norm_str)
-
-    for c in ["start_date", "end_date"]:
-        if c in dfx.columns:
-            dfx[c] = pd.to_datetime(dfx[c], errors="coerce")
-
-    numeric_cols = [
-        "boost_days",
-        "post_views",
-        "viewers",
-        "chat_started",
-        "daily_budget_usd",
-        "total_spend_usd",
-        "total_spend_mnt",
-        "voice_spend_mnt",
-        "adobe_spend_mnt",
-        "hera_spend_mnt",
-    ]
-    for c in numeric_cols:
-        if c in dfx.columns:
-            dfx[c] = dfx[c].apply(_parse_money)
-
-    if "post_content" in dfx.columns:
-        dfx = dfx[dfx["post_content"] != ""].copy()
-
-    return dfx
-
-
-def _prep_operation(df: pd.DataFrame) -> pd.DataFrame:
-    dfx = df.copy()
-    rename_map = {
-        "Ажлын төрөл": "task_type",
-        "Төслийн нэр": "project_name",
-        "Эхлэх огноо": "start_date",
-        "Дуусах огноо": "end_date",
-        "Хугацаа": "duration_days",
-        "Хариуцагч": "owner",
-        "Дэмжигч": "supporter",
-        "Явцын тайлбар": "progress_note",
-        "Явц": "status",
-    }
-    dfx = dfx.rename(columns=rename_map)
-
-    for c in ["task_type", "project_name", "owner", "supporter", "progress_note", "status"]:
-        if c in dfx.columns:
-            dfx[c] = dfx[c].apply(_norm_str)
-
-    for c in ["start_date", "end_date"]:
-        if c in dfx.columns:
-            dfx[c] = pd.to_datetime(dfx[c], errors="coerce")
-
-    if "duration_days" in dfx.columns:
-        dfx["duration_days_num"] = pd.to_numeric(dfx["duration_days"], errors="coerce").fillna(0)
-    else:
-        dfx["duration_days_num"] = 0.0
-
-    return dfx
-
-# =========================
-# DATA LOAD
-# =========================
-@st.cache_data(ttl=60)
-def load_all_sheets(path: str) -> dict[str, pd.DataFrame]:
-    xls = pd.ExcelFile(path)
-    required = ["Ticket", "Sales", "Social media", "Operation"]
-
-    data = {}
-    for sheet in required:
-        if sheet not in xls.sheet_names:
-            raise ValueError(f"'{sheet}' sheet олдсонгүй. Байгаа sheet-үүд: {xls.sheet_names}")
-        data[sheet] = pd.read_excel(xls, sheet_name=sheet)
-
-    return data
-
-
-try:
-    sheets = load_all_sheets(EXCEL_PATH)
-except Exception as e:
-    st.error(str(e))
-    st.stop()
-
-# =========================
 # HEADER
 # =========================
 h1, h2 = st.columns([1, 3.8], vertical_alignment="center")
@@ -494,8 +481,13 @@ with st.sidebar:
     dfrom = st.date_input("Эхлэх огноо", value=today - timedelta(days=29))
     dto = st.date_input("Дуусах огноо", value=today)
 
+    if st.button("🔄 Refresh data"):
+        st.cache_data.clear()
+        st.rerun()
+
     st.markdown("---")
-    st.markdown(f"<div class='mini-note'>Excel: <b>{EXCEL_PATH}</b></div>", unsafe_allow_html=True)
+    st.markdown("<div class='mini-note'>Data source:</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='mini-note'><b>{DATA_FILE_URL}</b></div>", unsafe_allow_html=True)
 
 # =========================
 # OVERVIEW
@@ -511,22 +503,20 @@ if menu == "Overview":
     social_cur = _filter_by_date(social_df, "start_date", dfrom, dto)
     operation_cur = _filter_by_date(operation_df, "start_date", dfrom, dto)
 
-    # Ticket KPIs
     total_tickets = len(ticket_cur)
     resolved_tickets = int((ticket_cur.get("status", pd.Series(dtype=str)) == "Шийдвэрлэсэн").sum()) if "status" in ticket_cur.columns else 0
+
     top_issue = "—"
     if "issue_type" in ticket_cur.columns:
         vc = ticket_cur["issue_type"].replace("", pd.NA).dropna().value_counts()
         if not vc.empty:
             top_issue = str(vc.index[0])
 
-    # Sales KPIs
     total_sales_records = len(sales_cur)
     total_pipeline = float(sales_cur.get("amount_num", pd.Series(dtype=float)).sum()) if "amount_num" in sales_cur.columns else 0.0
     total_weighted = float(sales_cur.get("weighted_amount_num", pd.Series(dtype=float)).sum()) if "weighted_amount_num" in sales_cur.columns else 0.0
     won_count = int((sales_cur.get("stage", pd.Series(dtype=str)).astype(str).str.lower() == "won").sum()) if "stage" in sales_cur.columns else 0
 
-    # Social KPIs
     total_posts = len(social_cur)
     total_social_views = float(social_cur.get("post_views", pd.Series(dtype=float)).sum()) if "post_views" in social_cur.columns else 0.0
     total_social_viewers = float(social_cur.get("viewers", pd.Series(dtype=float)).sum()) if "viewers" in social_cur.columns else 0.0
@@ -540,7 +530,6 @@ if menu == "Overview":
         if not top_post_df.empty:
             social_top_post = str(top_post_df.iloc[0]["post_content"])
 
-    # Operation KPIs
     total_tasks = len(operation_cur)
     done_tasks = int((operation_cur.get("status", pd.Series(dtype=str)) == "Хийгдсэн").sum()) if "status" in operation_cur.columns else 0
     contract_tasks = int(operation_cur["task_type"].str.contains("гэрээ", case=False, na=False).sum()) if "task_type" in operation_cur.columns else 0
@@ -606,7 +595,7 @@ if menu == "Overview":
             • Sales KPI нь бүртгэгдсэн санал, pipeline дүн, won боломжуудыг харуулна.<br>
             • Social KPI нь нийт views, chats, spend болон top post-ыг харуулна.<br>
             • Operation KPI нь ажлын явц, гэрээтэй холбоотой ажлуудыг харуулна.<br>
-            • Excel source: <b>{EXCEL_PATH}</b>
+            • Excel source: <b>{DATA_FILE_URL}</b>
             </div>
             """,
             unsafe_allow_html=True,
