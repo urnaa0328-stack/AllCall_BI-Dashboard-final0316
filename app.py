@@ -29,7 +29,7 @@ CARD_BORDER = "rgba(255,255,255,0.10)"
 # =========================
 # DATA SOURCE
 # =========================
-DATA_FILE_URL = "https://ftp.clouds.mn/s/Xrm8jqRPwP4Z8dN/download"
+DATA_FILE_URL = st.secrets["https://ftp.clouds.mn/s/Xrm8jqRPwP4Z8dN/download"]
 
 # =========================
 # HELPERS
