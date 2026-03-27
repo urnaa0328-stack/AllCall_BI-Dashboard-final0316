@@ -49,9 +49,7 @@ def resolve_logo_path() -> str | None:
         if p.exists():
             return str(p)
     return None
-
-
-EXCEL_PATH = resolve_excel_path()
+    
 LOGO_PATH = resolve_logo_path()
 
 # =========================
